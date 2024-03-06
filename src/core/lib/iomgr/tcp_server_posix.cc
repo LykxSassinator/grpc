@@ -277,7 +277,7 @@ static void on_read(void* arg, grpc_error_handle err) {
     }
 
     // Create and bind fd randomly with the given addr.
-    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, sp);
+    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, sp->server);
 
     // Create acceptor.
     grpc_tcp_server_acceptor* acceptor =
