@@ -21,6 +21,8 @@
 
 #include <grpc/support/port_platform.h>
 
+#include <unordered_map>
+
 #include "src/core/lib/iomgr/ev_posix.h"
 #include "src/core/lib/iomgr/resolve_address.h"
 #include "src/core/lib/iomgr/socket_utils_posix.h"
@@ -87,8 +89,9 @@ struct grpc_tcp_server {
    * owned by this struct */
   const std::vector<grpc_pollset*>* pollsets = nullptr;
 
-  /* next pollset to assign a channel to */
-  gpr_atm next_pollset_to_assign = 0;
+  /* next pollset to assign a channel to, it is a map from pollset name to ip
+   * address */
+  std::unordered_map<std::string, gpr_atm> next_pollset_to_assign_ids;
 
   /* channel args for this server */
   grpc_channel_args* channel_args = nullptr;

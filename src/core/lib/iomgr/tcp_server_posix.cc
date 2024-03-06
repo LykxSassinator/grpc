@@ -104,7 +104,7 @@ static grpc_error_handle tcp_server_create(grpc_closure* shutdown_complete,
   s->fd_handler = nullptr;
   s->memory_quota =
       grpc_core::ResourceQuotaFromChannelArgs(args)->memory_quota();
-  gpr_atm_no_barrier_store(&s->next_pollset_to_assign, 0);
+  gpr_atm_no_barrier_store(&s->next_pollset_to_assign_ids[""], 0);
   *server = s;
   return GRPC_ERROR_NONE;
 }
@@ -253,15 +253,8 @@ static void on_read(void* arg, grpc_error_handle err) {
               addr_str.c_str());
     }
 
-    std::string name = absl::StrCat("tcp-server-connection:", addr_str);
-    grpc_fd* fdobj = grpc_fd_create(fd, name.c_str(), true);
-
-    read_notifier_pollset = (*(sp->server->pollsets))
-        [static_cast<size_t>(gpr_atm_no_barrier_fetch_add(
-             &sp->server->next_pollset_to_assign, 1)) %
-         sp->server->pollsets->size()];
-
-    grpc_pollset_add_fd(read_notifier_pollset, fdobj);
+    // Create and bind fd randomly with the given addr.
+    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, sp);
 
     // Create acceptor.
     grpc_tcp_server_acceptor* acceptor =
@@ -276,7 +269,7 @@ static void on_read(void* arg, grpc_error_handle err) {
         read_notifier_pollset, acceptor);
   }
 
-  GPR_UNREACHABLE_CODE(return );
+  GPR_UNREACHABLE_CODE(return);
 
 error:
   gpr_mu_lock(&sp->server->mu);
@@ -600,13 +593,8 @@ class ExternalConnectionHandler : public grpc_core::TcpServerFdHandler {
       gpr_log(GPR_INFO, "SERVER_CONNECT: incoming external connection: %s",
               addr_str.c_str());
     }
-    std::string name = absl::StrCat("tcp-server-connection:", addr_str);
-    grpc_fd* fdobj = grpc_fd_create(fd, name.c_str(), true);
-    read_notifier_pollset =
-        (*(s_->pollsets))[static_cast<size_t>(gpr_atm_no_barrier_fetch_add(
-                              &s_->next_pollset_to_assign, 1)) %
-                          s_->pollsets->size()];
-    grpc_pollset_add_fd(read_notifier_pollset, fdobj);
+    // Create and bind fd randomly with the given addr.
+    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, s_);
     grpc_tcp_server_acceptor* acceptor =
         static_cast<grpc_tcp_server_acceptor*>(gpr_malloc(sizeof(*acceptor)));
     acceptor->from_server = s_;
@@ -629,6 +617,27 @@ static grpc_core::TcpServerFdHandler* tcp_server_create_fd_handler(
     grpc_tcp_server* s) {
   s->fd_handler = new ExternalConnectionHandler(s);
   return s->fd_handler;
+}
+
+grpc_fd* randomly_bind_tcp_server(int fd, const std::string& addr_str,
+                                  grpc_tcp_server* s) {
+  // addr_str format: ipv4/ipv6:ipv6:port
+  std::size_t start = addr_str.find_first_of(":") + 1;
+  std::size_t end = addr_str.find(":", start);
+  std::string ip = addr_str.substr(start, end - start);
+
+  std::string name = absl::StrCat("tcp-server-connection:", addr_str);
+  grpc_fd* fdobj = grpc_fd_create(fd, name.c_str(), true);
+
+  // Randomly choose one channel idx for this fd.
+  std::size_t cq_idx = static_cast<size_t>(rand()) % s->pollsets->size();
+  if (!gpr_atm_no_barrier_cas(&s->next_pollset_to_assign_ids[ip], 0, cq_idx)) {
+    cq_idx = static_cast<size_t>(gpr_atm_no_barrier_fetch_add(
+                 &s->next_pollset_to_assign_ids[ip], 1)) %
+             s->pollsets->size();
+  }
+  grpc_pollset_add_fd((*(s->pollsets))[cq_idx], fdobj);
+  return fdobj;
 }
 
 grpc_tcp_server_vtable grpc_posix_tcp_server_vtable = {
