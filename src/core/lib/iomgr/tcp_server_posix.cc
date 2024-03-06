@@ -61,6 +61,29 @@
 #include "src/core/lib/iomgr/unix_sockets_posix.h"
 #include "src/core/lib/resource_quota/api.h"
 
+/* Bind the tcp server with given fd, by randomly choosing
+ * one cqueue. */
+grpc_fd* randomly_bind_tcp_server(int fd, const std::string& addr_str,
+                                  grpc_tcp_server* s) {
+  // addr_str format: ipv4/ipv6:ipv6:port
+  std::size_t start = addr_str.find_first_of(":") + 1;
+  std::size_t end = addr_str.find(":", start);
+  std::string ip = addr_str.substr(start, end - start);
+
+  std::string name = absl::StrCat("tcp-server-connection:", addr_str);
+  grpc_fd* fdobj = grpc_fd_create(fd, name.c_str(), true);
+
+  // Randomly choose one channel idx for this fd.
+  std::size_t cq_idx = static_cast<size_t>(rand()) % s->pollsets->size();
+  if (!gpr_atm_no_barrier_cas(&s->next_pollset_to_assign_ids[ip], 0, cq_idx)) {
+    cq_idx = static_cast<size_t>(gpr_atm_no_barrier_fetch_add(
+                 &s->next_pollset_to_assign_ids[ip], 1)) %
+             s->pollsets->size();
+  }
+  grpc_pollset_add_fd((*(s->pollsets))[cq_idx], fdobj);
+  return fdobj;
+}
+
 static grpc_error_handle tcp_server_create(grpc_closure* shutdown_complete,
                                            const grpc_channel_args* args,
                                            grpc_tcp_server** server) {
@@ -617,27 +640,6 @@ static grpc_core::TcpServerFdHandler* tcp_server_create_fd_handler(
     grpc_tcp_server* s) {
   s->fd_handler = new ExternalConnectionHandler(s);
   return s->fd_handler;
-}
-
-grpc_fd* randomly_bind_tcp_server(int fd, const std::string& addr_str,
-                                  grpc_tcp_server* s) {
-  // addr_str format: ipv4/ipv6:ipv6:port
-  std::size_t start = addr_str.find_first_of(":") + 1;
-  std::size_t end = addr_str.find(":", start);
-  std::string ip = addr_str.substr(start, end - start);
-
-  std::string name = absl::StrCat("tcp-server-connection:", addr_str);
-  grpc_fd* fdobj = grpc_fd_create(fd, name.c_str(), true);
-
-  // Randomly choose one channel idx for this fd.
-  std::size_t cq_idx = static_cast<size_t>(rand()) % s->pollsets->size();
-  if (!gpr_atm_no_barrier_cas(&s->next_pollset_to_assign_ids[ip], 0, cq_idx)) {
-    cq_idx = static_cast<size_t>(gpr_atm_no_barrier_fetch_add(
-                 &s->next_pollset_to_assign_ids[ip], 1)) %
-             s->pollsets->size();
-  }
-  grpc_pollset_add_fd((*(s->pollsets))[cq_idx], fdobj);
-  return fdobj;
 }
 
 grpc_tcp_server_vtable grpc_posix_tcp_server_vtable = {
