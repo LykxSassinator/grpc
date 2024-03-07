@@ -61,10 +61,15 @@
 #include "src/core/lib/iomgr/unix_sockets_posix.h"
 #include "src/core/lib/resource_quota/api.h"
 
+struct grpc_tcp_server_binding_details {
+  grpc_fd* fdobj;
+  grpc_pollset* read_notifier_pollset;
+};
+
 /* Bind the tcp server with given fd, by randomly choosing
  * one cqueue. */
-grpc_fd* randomly_bind_tcp_server(int fd, const std::string& addr_str,
-                                  grpc_tcp_server* s) {
+grpc_tcp_server_binding_details* randomly_bind_tcp_server(
+    int fd, const std::string& addr_str, grpc_tcp_server* s) {
   // addr_str format: ipv4/ipv6:ipv6:port
   std::size_t start = addr_str.find_first_of(":") + 1;
   std::size_t end = addr_str.find(":", start);
@@ -80,8 +85,11 @@ grpc_fd* randomly_bind_tcp_server(int fd, const std::string& addr_str,
                  &s->next_pollset_to_assign_ids[ip], 1)) %
              s->pollsets->size();
   }
-  grpc_pollset_add_fd((*(s->pollsets))[cq_idx], fdobj);
-  return fdobj;
+  grpc_pollset* read_notifier_pollset = (*(s->pollsets))[cq_idx];
+  grpc_pollset_add_fd(read_notifier_pollset, fdobj);
+  grpc_tcp_server_binding_details* details =
+      new grpc_tcp_server_binding_details{fdobj, read_notifier_pollset};
+  return details;
 }
 
 static grpc_error_handle tcp_server_create(grpc_closure* shutdown_complete,
@@ -210,7 +218,6 @@ static void tcp_server_destroy(grpc_tcp_server* s) {
 /* event manager callback when reads are ready */
 static void on_read(void* arg, grpc_error_handle err) {
   grpc_tcp_listener* sp = static_cast<grpc_tcp_listener*>(arg);
-  grpc_pollset* read_notifier_pollset;
   if (err != GRPC_ERROR_NONE) {
     goto error;
   }
@@ -277,7 +284,8 @@ static void on_read(void* arg, grpc_error_handle err) {
     }
 
     // Create and bind fd randomly with the given addr.
-    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, sp->server);
+    grpc_tcp_server_binding_details* details =
+        randomly_bind_tcp_server(fd, addr_str, sp->server);
 
     // Create acceptor.
     grpc_tcp_server_acceptor* acceptor =
@@ -288,8 +296,8 @@ static void on_read(void* arg, grpc_error_handle err) {
     acceptor->external_connection = false;
     sp->server->on_accept_cb(
         sp->server->on_accept_cb_arg,
-        grpc_tcp_create(fdobj, sp->server->channel_args, addr_str),
-        read_notifier_pollset, acceptor);
+        grpc_tcp_create(details->fdobj, sp->server->channel_args, addr_str),
+        details->read_notifier_pollset, acceptor);
   }
 
   GPR_UNREACHABLE_CODE(return);
@@ -598,7 +606,6 @@ class ExternalConnectionHandler : public grpc_core::TcpServerFdHandler {
 
   // TODO(yangg) resolve duplicate code with on_read
   void Handle(int listener_fd, int fd, grpc_byte_buffer* buf) override {
-    grpc_pollset* read_notifier_pollset;
     grpc_resolved_address addr;
     memset(&addr, 0, sizeof(addr));
     addr.len = static_cast<socklen_t>(sizeof(struct sockaddr_storage));
@@ -617,7 +624,8 @@ class ExternalConnectionHandler : public grpc_core::TcpServerFdHandler {
               addr_str.c_str());
     }
     // Create and bind fd randomly with the given addr.
-    grpc_fd* fdobj = randomly_bind_tcp_server(fd, addr_str, s_);
+    grpc_tcp_server_binding_details* details =
+        randomly_bind_tcp_server(fd, addr_str, s_);
     grpc_tcp_server_acceptor* acceptor =
         static_cast<grpc_tcp_server_acceptor*>(gpr_malloc(sizeof(*acceptor)));
     acceptor->from_server = s_;
@@ -626,9 +634,10 @@ class ExternalConnectionHandler : public grpc_core::TcpServerFdHandler {
     acceptor->external_connection = true;
     acceptor->listener_fd = listener_fd;
     acceptor->pending_data = buf;
-    s_->on_accept_cb(s_->on_accept_cb_arg,
-                     grpc_tcp_create(fdobj, s_->channel_args, addr_str),
-                     read_notifier_pollset, acceptor);
+    s_->on_accept_cb(
+        s_->on_accept_cb_arg,
+        grpc_tcp_create(details->fdobj, s_->channel_args, addr_str),
+        details->read_notifier_pollset, acceptor);
   }
 
  private:
